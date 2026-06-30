@@ -1,0 +1,11 @@
+sync:
+  spejder:
+    alpha: "."
+    beta: "condor:/home/arved/spejder"
+    mode: "two-way-safe"
+    ignore:
+      vcs: true
+      paths:
+        - "result"
+        - "result-*"
+        - "*.mmdb"
