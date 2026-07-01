@@ -1,5 +1,5 @@
 {
-  description = "A Nix-flake-based Go development environment";
+  description = "spejder — eBPF network monitor";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -7,7 +7,7 @@
     { self, ... }@inputs:
 
     let
-      goVersion = 26; # Change this to update the whole stack
+      goVersion = 26;
 
       supportedSystems = [
         "x86_64-linux"
@@ -31,6 +31,15 @@
       overlays.default = final: prev: {
         go = final."go_1_${toString goVersion}";
       };
+
+      packages = forEachSupportedSystem (
+        { pkgs }:
+        {
+          default = pkgs.callPackage ./nix/package.nix { };
+        }
+      );
+
+      nixosModules.default = import ./nix/module.nix;
 
       devShells = forEachSupportedSystem (
         { pkgs }:
@@ -66,20 +75,20 @@
             ];
 
             shellHook = ''
-              export BPF_CLANG="${pkgs.clang.cc}/bin/clang"
-              export LIBBPF_INCLUDE="${pkgs.libbpf}/include"
-              export LINUX_INCLUDE="${pkgs.linuxHeaders}/include"
+                            export BPF_CLANG="${pkgs.clang.cc}/bin/clang"
+                            export LIBBPF_INCLUDE="${pkgs.libbpf}/include"
+                            export LINUX_INCLUDE="${pkgs.linuxHeaders}/include"
 
-              cat > .clangd <<EOF
-CompileFlags:
-  Add:
-    - -target
-    - bpf
-    - -I${pkgs.libbpf}/include
-    - -I${pkgs.linuxHeaders}/include
-    - -D__BPF_TRACING__
-    - -D__KERNEL__
-EOF
+                            cat > .clangd <<EOF
+              CompileFlags:
+                Add:
+                  - -target
+                  - bpf
+                  - -I${pkgs.libbpf}/include
+                  - -I${pkgs.linuxHeaders}/include
+                  - -D__BPF_TRACING__
+                  - -D__KERNEL__
+              EOF
             '';
           };
         }
