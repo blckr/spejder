@@ -8,7 +8,7 @@ import (
 )
 
 func main() {
-	dbPath := flag.String("db", "spejder.db", "path to sqlite database")
+	dbPath := flag.String("db", "/var/lib/spejder/spejder.db", "path to sqlite database")
 	flag.Parse()
 
 	if err := tui.Run(*dbPath); err != nil {

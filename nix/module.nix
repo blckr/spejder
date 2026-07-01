@@ -68,7 +68,7 @@ in
 
       serviceConfig = {
         ExecStart = lib.escapeShellArgs [
-          "${cfg.package}/bin/collect"
+          "${cfg.package}/bin/spejder-daemon"
           "-db" cfg.dbPath
           "-city-db" cfg.cityDbPath
           "-asn-db" cfg.asnDbPath

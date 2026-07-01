@@ -1,5 +1,5 @@
-daemon := "collect"
-tui    := "tui"
+daemon := "spejder-daemon"
+tui    := "spejder"
 db     := "spejder.db"
 
 # Show available recipes
@@ -21,11 +21,11 @@ ebpf:
 
 # Build monitoring daemon (without recompiling eBPF)
 build-daemon:
-    GOOS=linux GOARCH=amd64 go build -o {{daemon}} ./cmd/collect/
+    GOOS=linux GOARCH=amd64 go build -o {{daemon}} ./cmd/spejder-daemon/
 
 # Build TUI
 build-tui:
-    GOOS=linux GOARCH=amd64 go build -o {{tui}} ./cmd/tui/
+    GOOS=linux GOARCH=amd64 go build -o {{tui}} ./cmd/spejder/
 
 # Build everything including eBPF (full build)
 build: ebpf build-daemon build-tui
