@@ -27,7 +27,7 @@ CREATE INDEX IF NOT EXISTS idx_traffic_type ON connections (traffic_type);
 `
 
 func Open(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", path+"?_busy_timeout=5000")
 	if err != nil {
 		return nil, err
 	}
