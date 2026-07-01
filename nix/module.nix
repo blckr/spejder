@@ -67,6 +67,13 @@ in
       after = [ "network.target" ];
 
       serviceConfig = {
+        ExecStartPre = lib.mkIf cfg.geoip.enable (pkgs.writeShellScript "spejder-init-geo" ''
+          mkdir -p /var/lib/spejder/geo
+          if [ ! -f ${lib.escapeShellArg cfg.cityDbPath} ]; then
+            echo "GeoIP databases missing, downloading..."
+            ${pkgs.geoipupdate}/bin/geoipupdate -f ${lib.escapeShellArg cfg.geoip.configFile} -d /var/lib/spejder/geo
+          fi
+        '');
         ExecStart = lib.escapeShellArgs [
           "${cfg.package}/bin/spejder-daemon"
           "-db" cfg.dbPath
