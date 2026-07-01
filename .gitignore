@@ -1,4 +1,7 @@
 .direnv/
 .clangd
 result/
+/collect
+spejder.db
+assets/geo/
 

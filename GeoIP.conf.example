@@ -1,0 +1,10 @@
+# MaxMind GeoLite2 configuration
+# 1. Create a free account at https://www.maxmind.com/en/geolite2/signup
+# 2. Copy this file to GeoIP.conf
+# 3. Fill in your AccountID and LicenseKey
+# 4. Run: make setup
+
+AccountID YOUR_ACCOUNT_ID
+LicenseKey YOUR_LICENSE_KEY
+EditionIDs GeoLite2-City GeoLite2-ASN
+DatabaseDirectory ./assets/geo
