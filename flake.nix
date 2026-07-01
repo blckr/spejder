@@ -52,11 +52,29 @@
               clang
               llvm
               libbpf
-linuxHeaders
+              linuxHeaders
+              clang-tools # clangd für den LSP
 
               # sync with server
               mutagen
             ];
+
+            shellHook = ''
+              export BPF_CLANG="${pkgs.clang.cc}/bin/clang"
+              export LIBBPF_INCLUDE="${pkgs.libbpf}/include"
+              export LINUX_INCLUDE="${pkgs.linuxHeaders}/include"
+
+              cat > .clangd <<EOF
+CompileFlags:
+  Add:
+    - -target
+    - bpf
+    - -I${pkgs.libbpf}/include
+    - -I${pkgs.linuxHeaders}/include
+    - -D__BPF_TRACING__
+    - -D__KERNEL__
+EOF
+            '';
           };
         }
       );
