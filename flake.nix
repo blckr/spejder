@@ -55,8 +55,14 @@
               linuxHeaders
               clang-tools # clangd für den LSP
 
+              # task runner
+              just
+
               # sync with server
               mutagen
+
+              # download MaxMind GeoLite2 databases
+              geoipupdate
             ];
 
             shellHook = ''
