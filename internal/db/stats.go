@@ -3,257 +3,76 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"strconv"
 	"time"
 )
 
-type TimeFilter int
-
-const (
-	FilterAll   TimeFilter = iota
-	FilterMonth
-	FilterWeek
-	Filter3Days
-	Filter24h
-)
-
-func (f TimeFilter) where() string {
-	switch f {
-	case FilterMonth:
-		return "seen_at >= datetime('now', '-1 month')"
-	case FilterWeek:
-		return "seen_at >= datetime('now', '-7 days')"
-	case Filter3Days:
-		return "seen_at >= datetime('now', '-3 days')"
-	case Filter24h:
-		return "seen_at >= datetime('now', '-1 day')"
-	default:
-		return "1=1"
-	}
+type IPDetail struct {
+	IP       string
+	Port     int
+	Country  string
+	ASNOrg   string
+	SeenAt   string
+	Duration string
 }
 
-func (f TimeFilter) Label() string {
-	return []string{"All Time", "Month", "Week", "3 Days", "24h"}[f]
-}
-
-// Filter combines a time window with an optional port constraint.
-type Filter struct {
-	Time TimeFilter
-	Port uint16 // 0 = all ports
-}
-
-func (f Filter) where() string {
-	w := f.Time.where()
-	if f.Port != 0 {
-		w += fmt.Sprintf(" AND dst_port = %d", f.Port)
-	}
-	return w
-}
-
-type CountryCount struct {
-	Country string
-	Count   int
-}
-
-type DayCount struct {
+type DrillItem struct {
 	Label string
 	Count int
+	Key   string
 }
 
-type TrafficStats struct {
-	Internal int
-	Scanner  int
-	Bot      int
-	Unknown  int
-	Total    int
-}
+func QueryDrill(database *sql.DB, groupCol string, whereClause string, args []any, limit int) ([]DrillItem, error) {
+	fullWhere := "direction = 'incoming'"
+	if whereClause != "" {
+		fullWhere += " AND " + whereClause
+	}
 
+	query := fmt.Sprintf(`
+			SELECT %s, COUNT(*) as cnt
+			FROM connections
+			WHERE %s AND %s != ''
+			GROUP BY %s
+			ORDER BY cnt DESC
+			LIMIT ?
+		`, groupCol, fullWhere, groupCol, groupCol)
 
-func TopCountries(database *sql.DB, f Filter, limit int) ([]CountryCount, error) {
-	q := fmt.Sprintf(`
-		SELECT country, count(*) as cnt
-		FROM connections
-		WHERE country != '' AND %s
-		GROUP BY country
-		ORDER BY cnt DESC
-		LIMIT ?`, f.where())
-
-	rows, err := database.Query(q, limit)
+	queryArgs := append(args, limit)
+	rows, err := database.Query(query, queryArgs...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var result []CountryCount
+	var result []DrillItem
 	for rows.Next() {
-		var c CountryCount
-		if err := rows.Scan(&c.Country, &c.Count); err != nil {
+		var item DrillItem
+		if err := rows.Scan(&item.Label, &item.Count); err != nil {
 			return nil, err
 		}
-		result = append(result, c)
+		item.Key = item.Label
+		result = append(result, item)
 	}
 	return result, rows.Err()
 }
 
-func TrafficByType(database *sql.DB, f Filter) (TrafficStats, error) {
-	q := fmt.Sprintf(`
-		SELECT
-			SUM(CASE WHEN traffic_type = 'internal' THEN 1 ELSE 0 END),
-			SUM(CASE WHEN traffic_type = 'scanner'  THEN 1 ELSE 0 END),
-			SUM(CASE WHEN traffic_type = 'bot'      THEN 1 ELSE 0 END),
-			SUM(CASE WHEN traffic_type = 'unknown'  THEN 1 ELSE 0 END),
-			COUNT(*)
-		FROM connections WHERE %s`, f.where())
-
-	var s TrafficStats
-	err := database.QueryRow(q).Scan(&s.Internal, &s.Scanner, &s.Bot, &s.Unknown, &s.Total)
-	return s, err
-}
-
-func DailyConnections(database *sql.DB, f Filter) ([]DayCount, error) {
-	label := "date(seen_at)"
-	if f.Time == Filter24h {
-		label = "strftime('%H:00', seen_at)"
+// Lowest Level connection
+func QueryLeaf(database *sql.DB, whereClause string, args []any, limit int) ([]IPDetail, error) {
+	fullWhere := "direction = 'incoming'"
+	if whereClause != "" {
+		fullWhere += " AND " + whereClause
 	}
-	q := fmt.Sprintf(`
-		SELECT %s, count(*) FROM connections
-		WHERE %s GROUP BY 1 ORDER BY 1 ASC`, label, f.where())
 
-	rows, err := database.Query(q)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+	query := fmt.Sprintf(`
+			SELECT src_ip, dst_port, country, asn_org, seen_at, IFNULL(duration_ms, 0)
+			FROM connections
+			WHERE %s
+			ORDER BY seen_at DESC
+			LIMIT ?
+		`, fullWhere)
 
-	var result []DayCount
-	for rows.Next() {
-		var d DayCount
-		if err := rows.Scan(&d.Label, &d.Count); err != nil {
-			return nil, err
-		}
-		result = append(result, d)
-	}
-	return result, rows.Err()
-}
-
-// TimeSeries returns connection counts bucketed by time with granularity depending on the filter.
-// 24h → hourly, 3days → 4h, week → 8h, month/all → daily.
-func TimeSeries(database *sql.DB, f Filter) ([]DayCount, error) {
-	var label string
-	switch f.Time {
-	case Filter24h:
-		label = "strftime('%Y-%m-%d %H:00', seen_at)"
-	case Filter3Days:
-		label = "strftime('%Y-%m-%d ', seen_at) || printf('%02d:00', (cast(strftime('%H', seen_at) as integer) / 4) * 4)"
-	case FilterWeek:
-		label = "strftime('%Y-%m-%d ', seen_at) || printf('%02d:00', (cast(strftime('%H', seen_at) as integer) / 8) * 8)"
-	default:
-		label = "date(seen_at)"
-	}
-	q := fmt.Sprintf(`
-		SELECT %s, count(*) FROM connections
-		WHERE %s GROUP BY 1 ORDER BY 1 ASC`, label, f.where())
-
-	rows, err := database.Query(q)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var result []DayCount
-	for rows.Next() {
-		var d DayCount
-		if err := rows.Scan(&d.Label, &d.Count); err != nil {
-			return nil, err
-		}
-		result = append(result, d)
-	}
-	return result, rows.Err()
-}
-
-func TopCitiesForCountry(database *sql.DB, f Filter, country string, limit int) ([]CountryCount, error) {
-	q := fmt.Sprintf(`
-		SELECT city, count(*) as cnt FROM connections
-		WHERE country = ? AND %s
-		GROUP BY city ORDER BY cnt DESC LIMIT ?`, f.where())
-
-	rows, err := database.Query(q, country, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var result []CountryCount
-	for rows.Next() {
-		var c CountryCount
-		if err := rows.Scan(&c.Country, &c.Count); err != nil {
-			return nil, err
-		}
-		result = append(result, c)
-	}
-	return result, rows.Err()
-}
-
-func TopASNsForCountryCity(database *sql.DB, f Filter, country, city string, limit int) ([]CountryCount, error) {
-	q := fmt.Sprintf(`
-		SELECT asn_org, count(*) as cnt FROM connections
-		WHERE country = ? AND city = ? AND %s
-		GROUP BY asn_org ORDER BY cnt DESC LIMIT ?`, f.where())
-
-	rows, err := database.Query(q, country, city, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var result []CountryCount
-	for rows.Next() {
-		var c CountryCount
-		if err := rows.Scan(&c.Country, &c.Count); err != nil {
-			return nil, err
-		}
-		result = append(result, c)
-	}
-	return result, rows.Err()
-}
-
-func TopASNsForType(database *sql.DB, f Filter, trafficType string, limit int) ([]CountryCount, error) {
-	q := fmt.Sprintf(`
-		SELECT asn_org, count(*) as cnt FROM connections
-		WHERE traffic_type = ? AND %s
-		GROUP BY asn_org ORDER BY cnt DESC LIMIT ?`, f.where())
-
-	rows, err := database.Query(q, trafficType, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var result []CountryCount
-	for rows.Next() {
-		var c CountryCount
-		if err := rows.Scan(&c.Country, &c.Count); err != nil {
-			return nil, err
-		}
-		result = append(result, c)
-	}
-	return result, rows.Err()
-}
-
-type IPDetail struct {
-	IP      string
-	Port    int
-	Country string
-	ASNOrg  string
-	SeenAt  string
-}
-
-func IPsForASN(database *sql.DB, f Filter, asnOrg string, limit int) ([]IPDetail, error) {
-	q := fmt.Sprintf(`
-		SELECT src_ip, dst_port, country, asn_org, seen_at FROM connections
-		WHERE asn_org = ? AND %s
-		ORDER BY seen_at DESC LIMIT ?`, f.where())
-
-	rows, err := database.Query(q, asnOrg, limit)
+	queryArgs := append(args, limit)
+	rows, err := database.Query(query, queryArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -262,7 +81,7 @@ func IPsForASN(database *sql.DB, f Filter, asnOrg string, limit int) ([]IPDetail
 	var result []IPDetail
 	for rows.Next() {
 		var d IPDetail
-		if err := rows.Scan(&d.IP, &d.Port, &d.Country, &d.ASNOrg, &d.SeenAt); err != nil {
+		if err := rows.Scan(&d.IP, &d.Port, &d.Country, &d.ASNOrg, &d.SeenAt, &d.Duration); err != nil {
 			return nil, err
 		}
 		result = append(result, d)
@@ -270,6 +89,64 @@ func IPsForASN(database *sql.DB, f Filter, asnOrg string, limit int) ([]IPDetail
 	return result, rows.Err()
 }
 
+// TimeFilter represents a time window.
+type TimeFilter int
+
+const (
+	FilterAll TimeFilter = iota
+	Filter6Months
+	Filter3Months
+	Filter1Month
+	Filter1Week
+	Filter3Days
+	Filter1Day
+	Filter1Hour
+)
+
+func (f TimeFilter) Where() string {
+	switch f {
+	case Filter6Months:
+		return "seen_at >= datetime('now', '-6 month')"
+	case Filter3Months:
+		return "seen_at >= datetime('now', '-3 month')"
+	case Filter1Month:
+		return "seen_at >= datetime('now', '-1 month')"
+	case Filter1Week:
+		return "seen_at >= datetime('now', '-7 days')"
+	case Filter3Days:
+		return "seen_at >= datetime('now', '-3 days')"
+	case Filter1Day:
+		return "seen_at >= datetime('now', '-1 day')"
+	case Filter1Hour:
+		return "seen_at >= datetime('now', '-1 hour')"
+	default:
+		return "1=1"
+	}
+}
+
+type DayCount struct {
+	Label string
+	Count int
+}
+
+func (f TimeFilter) Label() string {
+	return []string{"All Time", "6 Months", "3 Months", "1 Month", "1 Week", "3 Days", "1 Day", "1 Hour"}[f]
+}
+
+type Filter struct {
+	Time TimeFilter
+	Port uint16 // 0 = all ports
+}
+
+func (f Filter) Where() string {
+	w := f.Time.Where()
+	if f.Port != 0 {
+		w += fmt.Sprintf(" AND dst_port = %d", f.Port)
+	}
+	return w
+}
+
+// IPSummary returns aggregated connection info for a specific source IP.
 type IPSummary struct {
 	IP          string
 	Country     string
@@ -281,7 +158,6 @@ type IPSummary struct {
 	Total       int
 }
 
-// IPSummaryForIP returns aggregated connection info for a specific source IP.
 func IPSummaryForIP(database *sql.DB, ip string) (IPSummary, error) {
 	const q = `
 		SELECT src_ip, country, city, asn, asn_org, traffic_type, max(seen_at), count(*)
@@ -299,3 +175,61 @@ func IPSummaryForIP(database *sql.DB, ip string) (IPSummary, error) {
 	s.LastSeen, _ = time.Parse("2006-01-02 15:04:05", lastSeen)
 	return s, nil
 }
+
+// TopPorts retrieves the most targeted ports for the Ports panel.
+func TopPorts(database *sql.DB, limit int) ([]DrillItem, error) {
+	rows, err := database.Query(`
+		SELECT dst_port, COUNT(*) as cnt
+		FROM connections
+		WHERE direction = 'incoming'
+		GROUP BY dst_port
+		ORDER BY cnt DESC
+		LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []DrillItem
+	for rows.Next() {
+		var port int
+		var count int
+		if err := rows.Scan(&port, &count); err != nil {
+			return nil, err
+		}
+		label := fmt.Sprintf("Port %d", port)
+		result = append(result, DrillItem{Label: label, Count: count, Key: strconv.Itoa(port)})
+	}
+	return result, nil
+}
+
+// ConnectionDurations groups connection counts by their duration.
+func ConnectionDurations(database *sql.DB) ([]DrillItem, error) {
+	q := `
+		SELECT
+			SUM(CASE WHEN closed_at IS NULL THEN 1 ELSE 0 END) as active,
+			SUM(CASE WHEN duration_ms IS NOT NULL AND duration_ms < 1000 THEN 1 ELSE 0 END) as instant,
+			SUM(CASE WHEN duration_ms >= 1000 AND duration_ms < 60000 THEN 1 ELSE 0 END) as short,
+			SUM(CASE WHEN duration_ms >= 60000 AND duration_ms < 600000 THEN 1 ELSE 0 END) as medium,
+			SUM(CASE WHEN duration_ms >= 600000 AND duration_ms < 3600000 THEN 1 ELSE 0 END) as long,
+			SUM(CASE WHEN duration_ms >= 3600000 THEN 1 ELSE 0 END) as persistent
+		FROM connections
+		WHERE direction = 'incoming'`
+
+	row := database.QueryRow(q)
+	var active, instant, short, medium, long, persistent int
+	if err := row.Scan(&active, &instant, &short, &medium, &long, &persistent); err != nil {
+		return nil, err
+	}
+
+	return []DrillItem{
+		{Label: "Still Active", Count: active, Key: "active"},
+		{Label: "Instant (<1s)", Count: instant, Key: "instant"},
+		{Label: "Short (1s-1m)", Count: short, Key: "short"},
+		{Label: "Medium (1m-10m)", Count: medium, Key: "medium"},
+		{Label: "Long (10m-1h)", Count: long, Key: "long"},
+		{Label: "Persistent (>1h)", Count: persistent, Key: "persistent"},
+	}, nil
+}
+
+

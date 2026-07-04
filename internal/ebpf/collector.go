@@ -9,20 +9,29 @@ import (
 	"github.com/cilium/ebpf/ringbuf"
 )
 
-// Event mirrors the C connection_event struct byte-for-byte.
+// Event represents a parsed connection event.
 type Event struct {
-	SrcIP   net.IP
-	DstPort uint16
-	Proto   uint8
-	Family  uint8
+	SocketID   uint64
+	LocalIP    net.IP
+	RemoteIP   net.IP
+	LocalPort  uint16
+	RemotePort uint16
+	EventType  uint8 // 1 = established, 2 = closed
+	OldState   uint8
+	Family     uint8
 }
 
 // rawEvent matches the memory layout of the C struct exactly.
 type rawEvent struct {
-	SrcIP   [16]byte
-	DstPort uint16
-	Proto   uint8
-	Family  uint8
+	SocketID   uint64
+	LocalIP    [16]byte
+	RemoteIP   [16]byte
+	LocalPort  uint16
+	RemotePort uint16
+	EventType  uint8
+	OldState   uint8
+	Family     uint8
+	Pad        uint8
 }
 
 type Collector struct {
@@ -70,19 +79,26 @@ func (c *Collector) Run(fn func(Event)) error {
 			continue
 		}
 
-		var ip net.IP
+		var localIP, remoteIP net.IP
 		if raw.Family == 10 { // AF_INET6
-			ip = make(net.IP, 16)
-			copy(ip, raw.SrcIP[:])
+			localIP = make(net.IP, 16)
+			copy(localIP, raw.LocalIP[:])
+			remoteIP = make(net.IP, 16)
+			copy(remoteIP, raw.RemoteIP[:])
 		} else { // AF_INET
-			ip = net.IP(raw.SrcIP[:4])
+			localIP = net.IP(raw.LocalIP[:4])
+			remoteIP = net.IP(raw.RemoteIP[:4])
 		}
 
 		fn(Event{
-			SrcIP:   ip,
-			DstPort: raw.DstPort,
-			Proto:   raw.Proto,
-			Family:  raw.Family,
+			SocketID:   raw.SocketID,
+			LocalIP:    localIP,
+			RemoteIP:   remoteIP,
+			LocalPort:  raw.LocalPort,
+			RemotePort: raw.RemotePort,
+			EventType:  raw.EventType,
+			OldState:   raw.OldState,
+			Family:     raw.Family,
 		})
 	}
 }
