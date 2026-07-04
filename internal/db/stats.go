@@ -31,11 +31,11 @@ func QueryDrill(database *sql.DB, groupCol string, whereClause string, args []an
 	query := fmt.Sprintf(`
 			SELECT %s, COUNT(*) as cnt
 			FROM connections
-			WHERE %s AND %s != ''
+			WHERE %s
 			GROUP BY %s
 			ORDER BY cnt DESC
 			LIMIT ?
-		`, groupCol, fullWhere, groupCol, groupCol)
+		`, groupCol, fullWhere, groupCol)
 
 	queryArgs := append(args, limit)
 	rows, err := database.Query(query, queryArgs...)
@@ -51,6 +51,15 @@ func QueryDrill(database *sql.DB, groupCol string, whereClause string, args []an
 			return nil, err
 		}
 		item.Key = item.Label
+		if item.Label == "" {
+			if groupCol == "city" {
+				item.Label = "???"
+			} else if groupCol == "country" {
+				item.Label = "??"
+			} else {
+				item.Label = "unknown"
+			}
+		}
 		result = append(result, item)
 	}
 	return result, rows.Err()
