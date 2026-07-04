@@ -13,7 +13,6 @@
 - **Multidimensional Dashboard:**
   - Left panel: **Countries** list with full drill-down flow (Countries ➔ Cities ➔ ASNs ➔ IP List).
   - Right panels: **Traffic Type**, **Connection Durations**, and targeted **Ports**.
-- **Interactive Drill-down:** Hit `Enter` or `l` on any panel item to filter down step-by-step to the exact IP addresses, connection reasons, and durations.
 - **PTR Lookup:** Reverse DNS lookup integrated in the connection details view.
 - **Smart Filtering:** Port filter inputs (`/`) and internal connections toggle (`n`) to filter out local traffic.
 
