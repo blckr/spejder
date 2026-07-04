@@ -331,15 +331,15 @@ func (m model) drillConditions(focus focusPanel, stack []drillLevel) (string, []
 
 	switch focus {
 	case focusLeft:
-		if len(stack) > 1 {
+		if len(stack) > 0 {
 			clauses = append(clauses, "country = ?")
 			args = append(args, stack[0].items[stack[0].sel].key)
 		}
-		if len(stack) > 2 {
+		if len(stack) > 1 {
 			clauses = append(clauses, "city = ?")
 			args = append(args, stack[1].items[stack[1].sel].key)
 		}
-		if len(stack) > 3 {
+		if len(stack) > 2 {
 			clauses = append(clauses, "asn_org = ?")
 			args = append(args, stack[2].items[stack[2].sel].key)
 		}
