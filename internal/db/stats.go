@@ -143,14 +143,18 @@ func (f TimeFilter) Label() string {
 }
 
 type Filter struct {
-	Time TimeFilter
-	Port uint16 // 0 = all ports
+	Time         TimeFilter
+	Port         uint16 // 0 = all ports
+	HideInternal bool
 }
 
 func (f Filter) Where() string {
 	w := f.Time.Where()
 	if f.Port != 0 {
 		w += fmt.Sprintf(" AND dst_port = %d", f.Port)
+	}
+	if f.HideInternal {
+		w += " AND traffic_type != 'internal'"
 	}
 	return w
 }
@@ -186,14 +190,21 @@ func IPSummaryForIP(database *sql.DB, ip string) (IPSummary, error) {
 }
 
 // TopPorts retrieves the most targeted ports for the Ports panel.
-func TopPorts(database *sql.DB, limit int) ([]DrillItem, error) {
-	rows, err := database.Query(`
+func TopPorts(database *sql.DB, whereClause string, args []any, limit int) ([]DrillItem, error) {
+	fullWhere := "direction = 'incoming'"
+	if whereClause != "" {
+		fullWhere += " AND " + whereClause
+	}
+	q := fmt.Sprintf(`
 		SELECT dst_port, COUNT(*) as cnt
 		FROM connections
-		WHERE direction = 'incoming'
+		WHERE %s
 		GROUP BY dst_port
 		ORDER BY cnt DESC
-		LIMIT ?`, limit)
+		LIMIT ?`, fullWhere)
+
+	queryArgs := append(args, limit)
+	rows, err := database.Query(q, queryArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -213,9 +224,13 @@ func TopPorts(database *sql.DB, limit int) ([]DrillItem, error) {
 }
 
 // ConnectionDurations groups connection counts by their duration.
-func ConnectionDurations(database *sql.DB) ([]DrillItem, error) {
-	q := `
-		SELECT
+func ConnectionDurations(database *sql.DB, whereClause string, args []any) ([]DrillItem, error) {
+	fullWhere := "direction = 'incoming'"
+	if whereClause != "" {
+		fullWhere += " AND " + whereClause
+	}
+	q := fmt.Sprintf(`
+		SELECT 
 			SUM(CASE WHEN closed_at IS NULL THEN 1 ELSE 0 END) as active,
 			SUM(CASE WHEN duration_ms IS NOT NULL AND duration_ms < 1000 THEN 1 ELSE 0 END) as instant,
 			SUM(CASE WHEN duration_ms >= 1000 AND duration_ms < 60000 THEN 1 ELSE 0 END) as short,
@@ -223,12 +238,19 @@ func ConnectionDurations(database *sql.DB) ([]DrillItem, error) {
 			SUM(CASE WHEN duration_ms >= 600000 AND duration_ms < 3600000 THEN 1 ELSE 0 END) as long,
 			SUM(CASE WHEN duration_ms >= 3600000 THEN 1 ELSE 0 END) as persistent
 		FROM connections
-		WHERE direction = 'incoming'`
+		WHERE %s`, fullWhere)
 
-	row := database.QueryRow(q)
-	var active, instant, short, medium, long, persistent int
-	if err := row.Scan(&active, &instant, &short, &medium, &long, &persistent); err != nil {
+	rows, err := database.Query(q, args...)
+	if err != nil {
 		return nil, err
+	}
+	defer rows.Close()
+
+	var active, instant, short, medium, long, persistent int
+	if rows.Next() {
+		if err := rows.Scan(&active, &instant, &short, &medium, &long, &persistent); err != nil {
+			return nil, err
+		}
 	}
 
 	return []DrillItem{

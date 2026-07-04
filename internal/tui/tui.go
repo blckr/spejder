@@ -40,9 +40,10 @@ const (
 
 // Model saves the state of the tui
 type model struct {
-	db         *sql.DB
-	timeFilter db.TimeFilter // Time Filter
-	portFilter uint16        // Port Filter (0 is all)
+	db           *sql.DB
+	timeFilter   db.TimeFilter // Time Filter
+	portFilter   uint16        // Port Filter (0 is all)
+	hideInternal bool          // Filter out internal/local connections
 
 	// If user want to filter ports
 	portInputMode bool
@@ -68,10 +69,11 @@ type model struct {
 
 func New(database *sql.DB) model {
 	return model{
-		db:         database,
-		timeFilter: db.FilterAll,
-		portFilter: 0,
-		focus:      focusLeft,
+		db:           database,
+		timeFilter:   db.FilterAll,
+		portFilter:   0,
+		hideInternal: false,
+		focus:        focusLeft,
 	}
 }
 
@@ -88,7 +90,7 @@ func (m model) tick() tea.Cmd {
 }
 
 func (m model) dbFilter() db.Filter {
-	return db.Filter{Time: m.timeFilter, Port: m.portFilter}
+	return db.Filter{Time: m.timeFilter, Port: m.portFilter, HideInternal: m.hideInternal}
 }
 
 type dashdataMsg struct {
@@ -105,8 +107,8 @@ func (m model) loadDash() tea.Cmd {
 		// 1. Daten aus der DB abfragen
 		dbCountries, _ := db.QueryDrill(m.db, "country", f.Where(), nil, 25)
 		dbTypes, _ := db.QueryDrill(m.db, "traffic_type", f.Where(), nil, 5)
-		dbDurations, _ := db.ConnectionDurations(m.db)
-		dbPorts, _ := db.TopPorts(m.db, 15)
+		dbDurations, _ := db.ConnectionDurations(m.db, f.Where(), nil)
+		dbPorts, _ := db.TopPorts(m.db, f.Where(), nil, 15)
 
 		// 2. In TUI-Strukturen konvertieren
 		countries := make([]drillItem, len(dbCountries))
@@ -164,7 +166,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case dashdataMsg:
 		if len(m.panelLeft.stack) == 0 {
-			m.panelLeft = newDrillPanel("Länder", msg.countries, m.panelLeft.width, m.panelLeft.height)
+			m.panelLeft = newDrillPanel("Countries", msg.countries, m.panelLeft.width, m.panelLeft.height)
 			m.panelRightType = newDrillPanel("Type", msg.types, m.panelRightType.width,
 				m.panelRightType.height)
 			m.panelRightDur = newDrillPanel("Duration", msg.durations, m.panelRightDur.width,
@@ -178,7 +180,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.panelRightPort.updateRoot(msg.ports)
 		}
 
-	// 4. Tastatureingaben verarbeiten
+	// 4. Handle key presses
 	case tea.KeyMsg:
 		// Detail modal swallows all input.
 		if m.detail != nil {
@@ -188,7 +190,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		// Port-Eingabemodus (wenn "/" gedrückt wurde)
+		// Port input mode (when "/" was pressed)
 		if m.portInputMode {
 			switch msg.String() {
 			case "esc":
@@ -217,11 +219,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		switch msg.String() {
-		// Beenden
+		// Quit
 		case "q", "ctrl+c":
 			return m, tea.Quit
 
-		// Port-Filter aktivieren
+		// Activate port filter
 		case "/":
 			m.portInputMode = true
 			m.portInput = ""
@@ -229,29 +231,34 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.portFilter = 0
 			return m, m.loadDash()
 
-		// Zeitfilter (1-8)
+		// Toggle internal connections
+		case "n":
+			m.hideInternal = !m.hideInternal
+			return m, m.loadDash()
+
+		// Time filter (1-8)
 		case "1", "2", "3", "4", "5", "6", "7", "8":
 			val, _ := strconv.Atoi(msg.String())
 			m.timeFilter = db.TimeFilter(val - 1)
 			return m, m.loadDash()
 
-		// Fokus wechseln (o/tab = vorwärts, i = rückwärts)
+		// Switch focus (o/tab = forward, i = backward)
 		case "o", "tab":
 			m.focus = focusPanel((int(m.focus) + 1) % 4)
 		case "i":
 			m.focus = focusPanel((int(m.focus) - 1 + 4) % 4)
 
-		// Navigation im fokussierten Panel (j/k / Pfeiltasten)
+		// Navigation in focused panel (j/k / arrow keys)
 		case "k", "up":
 			m.focusedPanel().moveUp()
 		case "j", "down":
 			m.focusedPanel().moveDown()
 
-		// Zurückgehen
+		// Go back
 		case "h", "left", "backspace":
 			m.focusedPanel().pop()
 
-		// Hineinbohren / Details öffnen
+		// Drill down / Open details
 		case "l", "right", "enter":
 			p := m.focusedPanel()
 			cur := p.current()
@@ -323,6 +330,9 @@ func (m model) drillConditions(focus focusPanel, stack []drillLevel) (string, []
 	if m.portFilter != 0 {
 		clauses = append(clauses, "dst_port = ?")
 		args = append(args, m.portFilter)
+	}
+	if m.hideInternal {
+		clauses = append(clauses, "traffic_type != 'internal'")
 	}
 	timeWhere := m.timeFilter.Where()
 	if timeWhere != "1=1" {
@@ -475,7 +485,7 @@ func (m model) drillCmd(panelID focusPanel) tea.Cmd {
 	}
 }
 
-// loadIPDetail lädt die IP-Details und den PTR-Eintrag (Reverse DNS) im Hintergrund
+// loadIPDetail loads IP details and reverses DNS PTR records in the background.
 func (m model) loadIPDetail(ip string) tea.Cmd {
 	return func() tea.Msg {
 		summary, _ := db.IPSummaryForIP(m.db, ip)
@@ -487,33 +497,33 @@ func (m model) loadIPDetail(ip string) tea.Cmd {
 	}
 }
 
-// View zeichnet das Terminal-Interface
+// View renders the terminal interface
 func (m model) View() string {
 	if m.width == 0 {
-		return "Lade..."
+		return "Loading..."
 	}
 
-	// 1. Die linke Spalte rendern (Länder)
+	// 1. Render left column (Countries)
 	leftView := m.panelLeft.view(m.focus == focusLeft)
 
-	// 2. Die rechte Spalte rendern (Type + Duration + Ports untereinander)
+	// 2. Render right column (Type + Duration + Ports stacked vertically)
 	rightView := lipgloss.JoinVertical(lipgloss.Left,
 		m.panelRightType.view(m.focus == focusRightType),
 		m.panelRightDur.view(m.focus == focusRightDur),
 		m.panelRightPort.view(m.focus == focusRightPort),
 	)
 
-	// 3. Spalten nebeneinander fügen
+	// 3. Join columns horizontally
 	body := lipgloss.JoinHorizontal(lipgloss.Top, leftView, rightView)
 
-	// 4. Den Header, den Body und die Hilfezeile übereinanderstapeln
+	// 4. Stack header, body, and help bar vertically
 	base := lipgloss.JoinVertical(lipgloss.Left,
 		m.viewHeader(),
 		body,
 		m.viewHelp(),
 	)
 
-	// 5. Falls das Detail-Modal einer IP offen ist, zeichnen wir es als Overlay darüber
+	// 5. Render IP detail overlay if open
 	if m.detail != nil {
 		return m.viewDetailOverlay(base)
 	}
@@ -521,7 +531,7 @@ func (m model) View() string {
 	return base
 }
 
-// viewHeader zeichnet die Kopfzeile des TUIs
+// viewHeader renders the TUI header bar
 func (m model) viewHeader() string {
 	filters := []db.TimeFilter{
 		db.FilterAll,
@@ -547,26 +557,29 @@ func (m model) viewHeader() string {
 	if m.portFilter != 0 {
 		t += " " + portTag.Render(fmt.Sprintf("port:%d", m.portFilter))
 	}
+	if m.hideInternal {
+		t += " " + portTag.Render("hide-internal")
+	}
 
 	filterBar := strings.Join(tabs, "")
 	gap := max(m.width-lipgloss.Width(t)-lipgloss.Width(filterBar), 1)
 	return t + strings.Repeat(" ", gap) + filterBar
 }
 
-// viewHelp zeichnet die Hilfezeile unten
+// viewHelp renders the bottom help bar
 func (m model) viewHelp() string {
 	if m.portInputMode {
-		return dim.Render("Port: ") + value.Render(m.portInput+"_") + dim.Render("  enter: filtern  esc: abbrechen")
+		return dim.Render("Port: ") + value.Render(m.portInput+"_") + dim.Render("  enter: filter  esc: cancel")
 	}
-	return dim.Render("i/o/tab: Panel wechseln  hjkl/arrows: Navigieren  enter/l: Hineinbohren/Details  1-8: Zeitfilter  /: Port-Filter  0: Filter zurücksetzen  q: Beenden")
+	return dim.Render("i/o/tab: switch panel  hjkl/arrows: navigate  enter/l: drill/details  1-8: time filter  /: port filter  0: reset filter  n: toggle internal  q: quit")
 }
 
-// detailRow zeichnet eine einzelne Zeile im IP-Detail-Modal
+// detailRow renders a single row inside the IP detail overlay
 func detailRow(k, v string) string {
 	return fmt.Sprintf("%-20s %s", label.Render(k), value.Render(v))
 }
 
-// viewDetailOverlay zeichnet das IP-Detail-Fenster zentriert über dem restlichen UI
+// viewDetailOverlay renders the IP detail popup centered on top of the UI
 func (m model) viewDetailOverlay(base string) string {
 	s := m.detail
 
@@ -577,31 +590,31 @@ func (m model) viewDetailOverlay(base string) string {
 
 	rdns := m.detailRDN
 	if rdns == "" {
-		rdns = dim.Render("(kein PTR Eintrag gefunden)")
+		rdns = dim.Render("(no PTR record found)")
 	}
 
 	lines := []string{
 		header.Render("IP Details"),
 		"",
-		detailRow("IP Adresse", s.IP),
-		detailRow("Standort", loc),
-		detailRow("Netzwerk", fmt.Sprintf("AS%d", s.ASN)),
-		detailRow("Organisation/ISP", s.ASNOrg),
+		detailRow("IP Address", s.IP),
+		detailRow("Location", loc),
+		detailRow("Network", fmt.Sprintf("AS%d", s.ASN)),
+		detailRow("ISP / Organization", s.ASNOrg),
 		detailRow("Reverse DNS", rdns),
-		detailRow("Verbindungstyp", s.TrafficType),
-		detailRow("Verbindungen gesamt", fmt.Sprintf("%d", s.Total)),
-		detailRow("Zuletzt gesehen", s.LastSeen.Format("2006-01-02 15:04:05")),
+		detailRow("Traffic Type", s.TrafficType),
+		detailRow("Total Connections", fmt.Sprintf("%d", s.Total)),
+		detailRow("Last Seen", s.LastSeen.Format("2006-01-02 15:04:05")),
 		"",
-		dim.Render("esc / q  Schließen"),
+		dim.Render("esc / q  Close"),
 	}
 
 	box := panel.Width(60).Render(strings.Join(lines, "\n"))
 
-	_ = base // Ersetzt den Hintergrund
+	_ = base // Replaced background
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 }
 
-// Run startet die TUI-Anwendung
+// Run starts the TUI application
 func Run(dbPath string) error {
 	database, err := db.Open(dbPath)
 	if err != nil {
