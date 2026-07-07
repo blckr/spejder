@@ -23,11 +23,6 @@ type DrillItem struct {
 }
 
 func QueryDrill(database *sql.DB, groupCol string, whereClause string, args []any, limit int) ([]DrillItem, error) {
-	fullWhere := "direction = 'incoming'"
-	if whereClause != "" {
-		fullWhere += " AND " + whereClause
-	}
-
 	query := fmt.Sprintf(`
 			SELECT %s, COUNT(*) as cnt
 			FROM connections
@@ -35,7 +30,7 @@ func QueryDrill(database *sql.DB, groupCol string, whereClause string, args []an
 			GROUP BY %s
 			ORDER BY cnt DESC
 			LIMIT ?
-		`, groupCol, fullWhere, groupCol)
+		`, groupCol, whereClause, groupCol)
 
 	queryArgs := append(args, limit)
 	rows, err := database.Query(query, queryArgs...)
@@ -65,20 +60,17 @@ func QueryDrill(database *sql.DB, groupCol string, whereClause string, args []an
 	return result, rows.Err()
 }
 
-// Lowest Level connection
-func QueryLeaf(database *sql.DB, whereClause string, args []any, limit int) ([]IPDetail, error) {
-	fullWhere := "direction = 'incoming'"
-	if whereClause != "" {
-		fullWhere += " AND " + whereClause
-	}
-
+// QueryLeaf returns the lowest-level connection rows. portCol selects which port
+// column to surface: "dst_port" for incoming (our listening port), "src_port" for
+// outgoing (the remote service port).
+func QueryLeaf(database *sql.DB, whereClause string, args []any, limit int, portCol string) ([]IPDetail, error) {
 	query := fmt.Sprintf(`
-			SELECT src_ip, dst_port, country, asn_org, seen_at, IFNULL(duration_ms, 0)
+			SELECT src_ip, %s, country, asn_org, seen_at, IFNULL(duration_ms, 0)
 			FROM connections
 			WHERE %s
 			ORDER BY seen_at DESC
 			LIMIT ?
-		`, fullWhere)
+		`, portCol, whereClause)
 
 	queryArgs := append(args, limit)
 	rows, err := database.Query(query, queryArgs...)
@@ -146,12 +138,33 @@ type Filter struct {
 	Time         TimeFilter
 	Port         uint16 // 0 = all ports
 	HideInternal bool
+	Direction    string // "incoming" or "outgoing", defaults to "incoming"
+}
+
+// PortCol returns the column that holds the service port for this direction.
+// Incoming: dst_port (our listening port). Outgoing: src_port (remote service port).
+func (f Filter) PortCol() string {
+	if f.Direction == "outgoing" {
+		return "src_port"
+	}
+	return "dst_port"
+}
+
+func (f Filter) direction() string {
+	if f.Direction == "" {
+		return "incoming"
+	}
+	return f.Direction
 }
 
 func (f Filter) Where() string {
-	w := f.Time.Where()
+	w := fmt.Sprintf("direction = '%s'", f.direction())
+	tw := f.Time.Where()
+	if tw != "1=1" {
+		w += " AND " + tw
+	}
 	if f.Port != 0 {
-		w += fmt.Sprintf(" AND dst_port = %d", f.Port)
+		w += fmt.Sprintf(" AND %s = %d", f.PortCol(), f.Port)
 	}
 	if f.HideInternal {
 		w += " AND traffic_type != 'internal'"
@@ -171,15 +184,18 @@ type IPSummary struct {
 	Total       int
 }
 
-func IPSummaryForIP(database *sql.DB, ip string) (IPSummary, error) {
+func IPSummaryForIP(database *sql.DB, ip string, direction string) (IPSummary, error) {
+	if direction == "" {
+		direction = "incoming"
+	}
 	const q = `
 		SELECT src_ip, country, city, asn, asn_org, traffic_type, max(seen_at), count(*)
 		FROM connections
-		WHERE src_ip = ?`
+		WHERE src_ip = ? AND direction = ?`
 
 	var s IPSummary
 	var lastSeen string
-	err := database.QueryRow(q, ip).Scan(
+	err := database.QueryRow(q, ip, direction).Scan(
 		&s.IP, &s.Country, &s.City, &s.ASN, &s.ASNOrg, &s.TrafficType, &lastSeen, &s.Total,
 	)
 	if err != nil {
@@ -189,19 +205,16 @@ func IPSummaryForIP(database *sql.DB, ip string) (IPSummary, error) {
 	return s, nil
 }
 
-// TopPorts retrieves the most targeted ports for the Ports panel.
-func TopPorts(database *sql.DB, whereClause string, args []any, limit int) ([]DrillItem, error) {
-	fullWhere := "direction = 'incoming'"
-	if whereClause != "" {
-		fullWhere += " AND " + whereClause
-	}
+// TopPorts retrieves the most-used ports for the Ports panel.
+// portCol should be "dst_port" for incoming and "src_port" for outgoing.
+func TopPorts(database *sql.DB, whereClause string, args []any, limit int, portCol string) ([]DrillItem, error) {
 	q := fmt.Sprintf(`
-		SELECT dst_port, COUNT(*) as cnt
+		SELECT %s, COUNT(*) as cnt
 		FROM connections
 		WHERE %s
-		GROUP BY dst_port
+		GROUP BY %s
 		ORDER BY cnt DESC
-		LIMIT ?`, fullWhere)
+		LIMIT ?`, portCol, whereClause, portCol)
 
 	queryArgs := append(args, limit)
 	rows, err := database.Query(q, queryArgs...)
@@ -225,12 +238,8 @@ func TopPorts(database *sql.DB, whereClause string, args []any, limit int) ([]Dr
 
 // ConnectionDurations groups connection counts by their duration.
 func ConnectionDurations(database *sql.DB, whereClause string, args []any) ([]DrillItem, error) {
-	fullWhere := "direction = 'incoming'"
-	if whereClause != "" {
-		fullWhere += " AND " + whereClause
-	}
 	q := fmt.Sprintf(`
-		SELECT 
+		SELECT
 			SUM(CASE WHEN closed_at IS NULL THEN 1 ELSE 0 END) as active,
 			SUM(CASE WHEN duration_ms IS NOT NULL AND duration_ms < 1000 THEN 1 ELSE 0 END) as instant,
 			SUM(CASE WHEN duration_ms >= 1000 AND duration_ms < 60000 THEN 1 ELSE 0 END) as short,
@@ -238,7 +247,7 @@ func ConnectionDurations(database *sql.DB, whereClause string, args []any) ([]Dr
 			SUM(CASE WHEN duration_ms >= 600000 AND duration_ms < 3600000 THEN 1 ELSE 0 END) as long,
 			SUM(CASE WHEN duration_ms >= 3600000 THEN 1 ELSE 0 END) as persistent
 		FROM connections
-		WHERE %s`, fullWhere)
+		WHERE %s`, whereClause)
 
 	rows, err := database.Query(q, args...)
 	if err != nil {

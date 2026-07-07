@@ -32,18 +32,19 @@ var (
 type focusPanel int
 
 const (
-	focusLeft      focusPanel = iota // Incoming - Countries
-	focusRightType                   // Incoming - Types
-	focusRightDur                    // Incoming - Duration
-	focusRightPort                   // Incoming - Ports
+	focusLeft      focusPanel = iota // Countries
+	focusRightType                   // Types
+	focusRightDur                    // Duration
+	focusRightPort                   // Ports
 )
 
 // Model saves the state of the tui
 type model struct {
-	db           *sql.DB
-	timeFilter   db.TimeFilter // Time Filter
-	portFilter   uint16        // Port Filter (0 is all)
-	hideInternal bool          // Filter out internal/local connections
+	db              *sql.DB
+	timeFilter      db.TimeFilter // Time Filter
+	portFilter      uint16        // Port Filter (0 is all)
+	hideInternal    bool          // Filter out internal/local connections
+	directionFilter string        // "incoming" or "outgoing"
 
 	// If user want to filter ports
 	portInputMode bool
@@ -69,11 +70,12 @@ type model struct {
 
 func New(database *sql.DB) model {
 	return model{
-		db:           database,
-		timeFilter:   db.FilterAll,
-		portFilter:   0,
-		hideInternal: false,
-		focus:        focusLeft,
+		db:              database,
+		timeFilter:      db.FilterAll,
+		portFilter:      0,
+		hideInternal:    false,
+		directionFilter: "incoming",
+		focus:           focusLeft,
 	}
 }
 
@@ -90,7 +92,17 @@ func (m model) tick() tea.Cmd {
 }
 
 func (m model) dbFilter() db.Filter {
-	return db.Filter{Time: m.timeFilter, Port: m.portFilter, HideInternal: m.hideInternal}
+	return db.Filter{
+		Time:         m.timeFilter,
+		Port:         m.portFilter,
+		HideInternal: m.hideInternal,
+		Direction:    m.directionFilter,
+	}
+}
+
+// portCol returns the service-port column for the current direction.
+func (m model) portCol() string {
+	return m.dbFilter().PortCol()
 }
 
 type dashdataMsg struct {
@@ -101,6 +113,7 @@ type dashdataMsg struct {
 }
 
 func (m model) loadDash() tea.Cmd {
+	portCol := m.portCol()
 	return func() tea.Msg {
 		f := m.dbFilter()
 
@@ -108,7 +121,7 @@ func (m model) loadDash() tea.Cmd {
 		dbCountries, _ := db.QueryDrill(m.db, "country", f.Where(), nil, 25)
 		dbTypes, _ := db.QueryDrill(m.db, "traffic_type", f.Where(), nil, 5)
 		dbDurations, _ := db.ConnectionDurations(m.db, f.Where(), nil)
-		dbPorts, _ := db.TopPorts(m.db, f.Where(), nil, 15)
+		dbPorts, _ := db.TopPorts(m.db, f.Where(), nil, 15, portCol)
 
 		// 2. In TUI-Strukturen konvertieren
 		countries := make([]drillItem, len(dbCountries))
@@ -236,6 +249,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.hideInternal = !m.hideInternal
 			return m, m.loadDash()
 
+		// Toggle direction (incoming / outgoing)
+		case "d":
+			if m.directionFilter == "outgoing" {
+				m.directionFilter = "incoming"
+			} else {
+				m.directionFilter = "outgoing"
+			}
+			m.panelLeft.stack = nil
+			m.panelRightType.stack = nil
+			m.panelRightDur.stack = nil
+			m.panelRightPort.stack = nil
+			return m, m.loadDash()
+
 		// Time filter (1-8)
 		case "1", "2", "3", "4", "5", "6", "7", "8":
 			val, _ := strconv.Atoi(msg.String())
@@ -324,11 +350,13 @@ func (m *model) focusedPanel() *drillPanel {
 
 // drillConditions baut die SQL-Filter dynamisch anhand des aktuellen Panel-Pfades zusammen.
 func (m model) drillConditions(focus focusPanel, stack []drillLevel) (string, []any) {
-	var clauses []string
+	portCol := m.portCol()
+
+	clauses := []string{fmt.Sprintf("direction = '%s'", m.directionFilter)}
 	var args []any
 
 	if m.portFilter != 0 {
-		clauses = append(clauses, "dst_port = ?")
+		clauses = append(clauses, portCol+" = ?")
 		args = append(args, m.portFilter)
 	}
 	if m.hideInternal {
@@ -403,7 +431,7 @@ func (m model) drillConditions(focus focusPanel, stack []drillLevel) (string, []
 
 	case focusRightPort:
 		port, _ := strconv.Atoi(stack[0].items[stack[0].sel].key)
-		clauses = append(clauses, "dst_port = ?")
+		clauses = append(clauses, portCol+" = ?")
 		args = append(args, port)
 
 		if len(stack) > 1 {
@@ -428,6 +456,7 @@ func (m model) drillCmd(panelID focusPanel) tea.Cmd {
 	p := m.getPanel(panelID)
 	stack := p.stack
 	depth := len(stack)
+	portCol := m.portCol()
 
 	return func() tea.Msg {
 		where, args := m.drillConditions(panelID, stack)
@@ -459,7 +488,7 @@ func (m model) drillCmd(panelID focusPanel) tea.Cmd {
 		}
 
 		if isLeaf {
-			dbIPs, _ := db.QueryLeaf(m.db, where, args, 20)
+			dbIPs, _ := db.QueryLeaf(m.db, where, args, 20, portCol)
 			items := make([]drillItem, len(dbIPs))
 			for i, ip := range dbIPs {
 				durationStr := ""
@@ -487,8 +516,9 @@ func (m model) drillCmd(panelID focusPanel) tea.Cmd {
 
 // loadIPDetail loads IP details and reverses DNS PTR records in the background.
 func (m model) loadIPDetail(ip string) tea.Cmd {
+	dir := m.directionFilter
 	return func() tea.Msg {
-		summary, _ := db.IPSummaryForIP(m.db, ip)
+		summary, _ := db.IPSummaryForIP(m.db, ip, dir)
 		rdns := ""
 		if names, err := net.LookupAddr(ip); err == nil && len(names) > 0 {
 			rdns = strings.TrimSuffix(names[0], ".")
@@ -552,7 +582,7 @@ func (m model) viewHeader() string {
 		}
 	}
 
-	t := title.Render("spejder") + dim.Render(" [incoming connections]")
+	t := title.Render("spejder") + dim.Render(fmt.Sprintf(" [%s connections]", m.directionFilter))
 
 	if m.portFilter != 0 {
 		t += " " + portTag.Render(fmt.Sprintf("port:%d", m.portFilter))
@@ -571,7 +601,7 @@ func (m model) viewHelp() string {
 	if m.portInputMode {
 		return dim.Render("Port: ") + value.Render(m.portInput+"_") + dim.Render("  enter: filter  esc: cancel")
 	}
-	return dim.Render("i/o/tab: switch panel  hjkl/arrows: navigate  enter/l: drill/details  1-8: time filter  /: port filter  0: reset filter  n: toggle internal  q: quit")
+	return dim.Render("i/o/tab: switch panel  hjkl/arrows: navigate  enter/l: drill/details  1-8: time filter  /: port filter  0: reset filter  n: toggle internal  d: toggle direction  q: quit")
 }
 
 // detailRow renders a single row inside the IP detail overlay
